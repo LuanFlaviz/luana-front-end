@@ -1,3 +1,5 @@
+const API_URL = "http://localhost:3000/api";
+
 /* =====================================================
        1. ARMAZENAMENTO (mesmas chaves das páginas antigas,
           então os dados já salvos continuam funcionando)
@@ -102,27 +104,47 @@ function proximoId(salvo, idsExistentes) {
   return Math.max(parseInt(salvo, 10) || 1, maior + 1);
 }
 
-function carregarEstado() {
-  state.estoque = store.read(KEYS.estoque, []);
-  state.proximoIdEstoque = proximoId(
-    store.read(KEYS.proximoIdEstoque, 1),
-    state.estoque.map((item) => Number(item.id)),
-  );
+async function carregarEstado() {
+    try {
+        // 1. Puxa os ingredientes do banco de dados
+        const respostaIngredientes = await fetch(`${API_URL}/ingredientes`);
+        state.estoque = await respostaIngredientes.json();
+        renderEstoque();
 
-  const nomes = store.read(KEYS.nomesProdutos, null);
-  if (nomes === null) {
-    state.nomes = structuredClone(PRODUTOS_PADRAO.nomes);
-    state.receitas = structuredClone(PRODUTOS_PADRAO.receitas);
-    salvarProdutos();
-  } else {
-    state.nomes = nomes;
-    state.receitas = store.read(KEYS.receitas, {});
-  }
-  state.proximoIdProduto = proximoId(
-    store.read(KEYS.proximoIdProduto, 1),
-    Object.keys(state.nomes).map(Number),
-  );
-  state.historico = store.read(KEYS.historico, []);
+        // 2. Puxa os produtos do banco de dados
+        const respostaProdutos = await fetch(`${API_URL}/produtos`);
+        const produtosBanco = await respostaProdutos.json();
+        
+        console.log("Produtos que vieram da API:", produtosBanco);
+
+        // 3. Prepara as variáveis do sistema
+        state.nomes = {};
+        state.receitas = {};
+
+        // 4. Lê o que veio do banco e organiza para o teu ecrã
+        produtosBanco.forEach(produto => {
+            // Guarda o nome
+            state.nomes[produto.id] = produto.nome;
+            
+            // Guarda os ingredientes da receita
+            state.receitas[produto.id] = {};
+            if (produto.receita) {
+                produto.receita.forEach(item => {
+                    // Traduz de volta para o formato { quantity, unit } que a tela usa
+                    state.receitas[produto.id][item.ingrediente] = {
+                        quantity: item.quantidade,
+                        unit: item.unidade
+                    };
+                });
+            }
+        });
+
+        // 5. Avisa o ecrã para desenhar a lista de produtos!
+        renderProdutos();
+
+    } catch (erro) {
+        console.error("Erro ao comunicar com a API:", erro);
+    }
 }
 
 function salvarEstoque() {
@@ -242,7 +264,7 @@ function avisar(mensagem, tipo = "ok") {
 }
 
 function atualizarSugestoes() {
-  const nomesEstoque = state.estoque.map((item) => item.name);
+  const nomesEstoque = state.estoque.map((item) => item.nome);
   const extras = SUGESTOES_PADRAO.map(normalizar).filter(
     (n) => !nomesEstoque.includes(n),
   );
@@ -255,115 +277,170 @@ function atualizarSugestoes() {
        4. PAINEL ESTOQUE
        ===================================================== */
 function renderEstoque() {
-  const lista = $("#listaEstoque");
-  const filtro = normalizar($("#pesquisaPainel").value);
-  const itens = state.estoque.filter((item) =>
-    normalizar(item.name).includes(filtro),
-  );
-  lista.replaceChildren(...itens.map(linhaEstoque));
-  $("#estoqueVazio").hidden = state.estoque.length > 0;
-  $("#estoqueSemResultados").hidden =
-    state.estoque.length === 0 || itens.length > 0;
-  atualizarSugestoes();
+    const lista = $("#listaEstoque");
+    
+    // 1. Lê todos os inputs e guarda na memória o que estiver preenchido
+    const memoriaInputs = {};
+    lista.querySelectorAll("input").forEach(input => {
+        const id = input.getAttribute("data-id");
+        if (id && input.value !== "") {
+            memoriaInputs[id] = input.value;
+        }
+    });
+
+    const filtro = normalizar($("#pesquisaPainel").value);
+    const itens = state.estoque.filter((item) =>
+        normalizar(item.nome).includes(filtro),
+    );
+    
+    // 2. Redesenha a lista com os saldos atualizados da API
+    lista.replaceChildren(...itens.map(linhaEstoque));
+    
+    // 3. Percorre a nova lista e devolve os valores digitados aos inputs corretos
+    lista.querySelectorAll("input").forEach(input => {
+        const id = input.getAttribute("data-id");
+        if (id && memoriaInputs[id] !== undefined) {
+            input.value = memoriaInputs[id];
+        }
+    });
+
+    $("#estoqueVazio").hidden = state.estoque.length > 0;
+    $("#estoqueSemResultados").hidden =
+        state.estoque.length === 0 || itens.length > 0;
+    atualizarSugestoes();
 }
 
 function linhaEstoque(item) {
-  const entrada = h("input", {
-    type: "number",
-    class: "field field--destaque",
-    min: "0",
-    step: item.unit === "Un" ? "1" : "any",
-    placeholder: "0",
-    "aria-label": `Quantidade a somar em ${item.name}`,
-    onkeydown: (e) => {
-      if (e.key === "Enter") somarEstoque(item.id, entrada);
-    },
-  });
+    const entrada = h("input", {
+        type: "number",
+        class: "field field--destaque",
+        "data-id": item.id, // <-- Adicionamos esta etiqueta para a memória
+        min: "0",
+        step: item.unidade === "Un" ? "1" : "any",
+        placeholder: "0",
+        "aria-label": `Quantidade a somar em ${item.nome}`,
+        onkeydown: (e) => {
+            if (e.key === "Enter") somarEstoque(item.id, entrada);
+        },
+    });
 
-  return h(
-    "li",
-    { class: "stock-row" + (Number(item.quantity) <= 0 ? " is-zerado" : "") },
-    h("span", { class: "row-name", text: item.name }),
-    h("span", {
-      class: "qty-badge",
-      text: `${formatarQtd(item.quantity, item.unit)} ${item.unit}`,
-    }),
-    entrada,
-    h("button", {
-      type: "button",
-      class: "btn-round",
-      text: "+",
-      "aria-label": `Somar ao estoque de ${item.name}`,
-      onclick: () => somarEstoque(item.id, entrada),
-    }),
-    h("button", {
-      type: "button",
-      class: "btn-remove",
-      text: "×",
-      "aria-label": `Excluir ${item.name} do estoque`,
-      onclick: () => excluirIngrediente(item.id),
-    }),
-  );
+    return h(
+        "li",
+        { class: "stock-row" + (item.alertaEstoqueBaixo ? " is-zerado" : "") },
+        h("span", { class: "row-name", text: item.nome }),
+        h("span", {
+            class: "qty-badge",
+            text: `${formatarQtd(item.quantidade, item.unidade)} ${item.unidade}`,
+        }),
+        entrada,
+        h("button", {
+            type: "button",
+            class: "btn-round",
+            text: "+",
+            "aria-label": `Somar ao estoque de ${item.nome}`,
+            onclick: () => somarEstoque(item.id, entrada),
+        }),
+        h("button", {
+            type: "button",
+            class: "btn-remove",
+            text: "×",
+            "aria-label": `Excluir ${item.nome} do estoque`,
+            onclick: () => excluirIngrediente(item.id),
+        })
+    );
 }
 
-function cadastrarIngrediente(evento) {
-  evento.preventDefault();
-  const nome = normalizar($("#novoIngredienteNome").value);
-  const qtd = lerNumero($("#novoIngredienteQtd").value);
-  const unidade = $("#novoIngredienteUnidade").value;
+async function cadastrarIngrediente(evento) {
+    evento.preventDefault();
+    const nome = normalizar($("#novoIngredienteNome").value);
+    const qtd = lerNumero($("#novoIngredienteQtd").value);
+    const unidadeTexto = $("#novoIngredienteUnidade").value;
 
-  if (!nome || isNaN(qtd) || qtd < 0) {
-    avisar("Preencha o nome e uma quantidade inicial válida.", "erro");
-    return;
-  }
-  if (state.estoque.some((item) => item.name === nome)) {
-    avisar(`${nome} já está no estoque. Use o + da linha para somar.`, "erro");
-    return;
-  }
+    if (!nome || isNaN(qtd) || qtd < 0) {
+        avisar("Preencha o nome e uma quantidade inicial válida.", "erro");
+        return;
+    }
 
-  state.estoque.push({
-    id: state.proximoIdEstoque++,
-    name: nome,
-    quantity: qtd,
-    unit: unidade,
-  });
-  salvarEstoque();
-  registrar(
-    "Cadastro de ingrediente",
-    nome,
-    qtd,
-    unidade,
-    "Quantidade inicial",
-  );
-  renderEstoque();
+    if (state.estoque.some((item) => item.nome === nome)) {
+        avisar(`${nome} já está no estoque. Use o + da linha para somar.`, "erro");
+        return;
+    }
 
-  evento.target.reset();
-  evento.target.hidden = true;
-  avisar(`${nome} adicionado ao estoque.`);
+    let unidadeId = 1; 
+    if (unidadeTexto === "Kg") unidadeId = 1;
+    else if (unidadeTexto === "L") unidadeId = 2;
+    else if (unidadeTexto === "Un") unidadeId = 3;
+    else if (unidadeTexto === "g") unidadeId = 4;
+
+    try {
+        const resposta = await fetch(`${API_URL}/ingredientes`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                nome: nome,
+                quantidade: qtd,
+                quantidade_minima: 0,
+                unidade: unidadeTexto,
+                ativo: 1
+            })
+        });
+
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json().catch(() => ({}));
+            throw new Error(erroAPI.erro || "Erro ao salvar no banco de dados");
+        }
+
+        $("#novoIngredienteNome").value = "";
+        $("#novoIngredienteQtd").value = "";
+        
+        avisar("Ingrediente cadastrado com sucesso!", "sucesso");
+        registrar("Cadastro de ingrediente", nome, qtd, unidadeTexto);
+
+        await carregarEstado(); 
+        renderEstoque();
+        
+        evento.target.reset();
+        evento.target.hidden = true;
+
+    } catch (erro) {
+        console.error("Erro ao cadastrar:", erro);
+        avisar(erro.message, "erro");
+    }
 }
+async function somarEstoque(id, entrada) {
+    const valor = lerNumero(entrada.value);
+    
+    if (isNaN(valor) || valor <= 0) {
+        avisar("Informe um valor positivo para somar.", "erro");
+        entrada.focus();
+        return;
+    }
 
-function somarEstoque(id, entrada) {
-  const item = state.estoque.find((i) => i.id === id);
-  const valor = lerNumero(entrada.value);
-  if (!item) return;
-  if (isNaN(valor) || valor <= 0) {
-    avisar("Informe um valor positivo para somar.", "erro");
-    entrada.focus();
-    return;
-  }
-  item.quantity = +(Number(item.quantity) + valor).toFixed(4);
-  salvarEstoque();
-  registrar(
-    "Entrada no estoque",
-    item.name,
-    valor,
-    item.unit,
-    `Novo total: ${formatarQtd(item.quantity, item.unit)} ${item.unit}`,
-  );
-  renderEstoque();
-  avisar(
-    `${item.name}: novo total ${formatarQtd(item.quantity, item.unit)} ${item.unit}.`,
-  );
+    try {
+        // Envia a quantidade a somar diretamente para a API do Luan
+        const resposta = await fetch(`${API_URL}/ingredientes/${id}/reposicoes`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ quantidade: valor })
+        });
+
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json();
+            avisar(`Erro da API: ${erroAPI.erro}`, "erro");
+            return;
+        }
+
+        // Se a API aceitar, limpamos o campo e recarregamos a lista da base de dados
+        entrada.value = ""; 
+        await carregarEstado(); 
+        avisar("Estoque atualizado com sucesso!", "sucesso");
+
+    } catch (erro) {
+        console.error("Erro ao repor estoque:", erro);
+        avisar("Falha ao comunicar com o servidor.", "erro");
+    }
 }
 
 function unidadeCompraParaEstoque(unidade) {
@@ -498,7 +575,7 @@ function definirItensCompra(itens, origem) {
     quantidade: item.quantidade ?? "",
     unidade:
       item.unidade ||
-      state.estoque.find((estoque) => estoque.name === normalizar(item.nome))?.unit ||
+      state.estoque.find((estoque) => estoque.nome === normalizar(item.nome))?.unit ||
       "Un",
   }));
   renderItensCompra();
@@ -606,16 +683,18 @@ function validarItensCompra() {
     });
 }
 
-function confirmarEntradaCompra() {
+async function confirmarEntradaCompra() {
   const linhas = [...$("#linhasCompra").querySelectorAll(".purchase-row")];
   validarItensCompra();
+
   if ($("#btnConfirmarCompra").disabled) {
     avisar("Revise e marque a conferência de cada item antes de continuar.", "erro");
     return;
   }
+
   const itens = linhas.map((linha) => {
     const [campoNome, campoQuantidade, campoUnidade] = linha.querySelectorAll(
-      "input:not([type=checkbox]), select",
+      "input:not([type=checkbox]), select"
     );
     return {
       nome: normalizar(campoNome.value),
@@ -623,20 +702,7 @@ function confirmarEntradaCompra() {
       unidade: campoUnidade.value,
     };
   });
-  for (const item of itens) {
-    const estoque = state.estoque.find((existente) => existente.name === item.nome);
-    if (!estoque || estoque.unit === item.unidade) continue;
-    const convertido = converterParaEstoque(item.quantidade, item.unidade, estoque.unit);
-    if (convertido === null) {
-      avisar(
-        `${item.nome}: unidade da nota (${item.unidade}) incompatível com o estoque (${estoque.unit}).`,
-        "erro",
-      );
-      return;
-    }
-    item.quantidade = convertido;
-    item.unidade = estoque.unit;
-  }
+
   const duplicados = new Set();
   for (const item of itens) {
     const chave = `${item.nome}|${item.unidade}`;
@@ -648,51 +714,73 @@ function confirmarEntradaCompra() {
     }
     duplicados.add(chave);
   }
+
   const resumo = itens
     .map((item) => `${item.nome}: ${formatarQtd(item.quantidade, item.unidade)} ${item.unidade}`)
     .join("\n");
+
   if (!confirm(`Confira os itens que serão somados ao estoque:\n\n${resumo}\n\nDeseja continuar?`)) {
     return;
   }
+
   if (!confirm("Última conferência: os saldos do estoque serão atualizados agora. Confirmar a entrada da compra?")) {
     return;
   }
 
-  for (const item of itens) {
-    let estoque = state.estoque.find((existente) => existente.name === item.nome);
-    if (estoque && estoque.unit !== item.unidade) {
-      const convertido = converterParaEstoque(item.quantidade, item.unidade, estoque.unit);
-      if (convertido === null) {
-        avisar(`${item.nome}: unidade da nota (${item.unidade}) incompatível com o estoque (${estoque.unit}).`, "erro");
-        return;
-      }
-      item.quantidade = convertido;
-    }
-    if (!estoque) {
-      estoque = {
-        id: state.proximoIdEstoque++,
-        name: item.nome,
-        quantity: 0,
-        unit: item.unidade,
-      };
-      state.estoque.push(estoque);
-    }
-    estoque.quantity = +(Number(estoque.quantity) + item.quantidade).toFixed(4);
-    registrar(
-      "Entrada no estoque",
-      item.nome,
-      item.quantidade,
-      estoque.unit,
-      "Compra conferida pela nota fiscal",
-    );
-  }
+  const btnConfirmar = $("#btnConfirmarCompra");
+  btnConfirmar.disabled = true;
+  btnConfirmar.textContent = "Processando...";
 
-  salvarEstoque();
-  renderEstoque();
-  $("#dialogNotaCompra").close();
-  fecharCameraNota();
-  itensCompraReconhecidos = [];
-  avisar(`${itens.length} item(ns) de compra adicionado(s) ao estoque.`);
+  try {
+    let sucessos = 0;
+    
+    for (const item of itens) {
+      // 1. Procura o ingrediente no estado atual para descobrir o ID real dele no banco
+      const ingredienteBanco = state.estoque.find(
+        (est) => est.nome.toUpperCase() === item.nome.toUpperCase()
+      );
+
+      // Se o scanner leu algo que não existe no banco, avisa e ignora esse item
+      if (!ingredienteBanco) {
+        avisar(`O item "${item.nome}" não existe no estoque. Cadastre-o primeiro.`, "erro");
+        continue; 
+      }
+      if (item.unidade !== ingredienteBanco.unidade) {
+        avisar(`A unidade de "${item.nome}" na nota (${item.unidade}) difere do estoque (${ingredienteBanco.unidade}). Corrija antes de confirmar.`, "erro");
+        continue;
+      }
+
+      // 2. Faz o fetch usando a rota e o formato exatos do Luan
+      const response = await fetch(`${API_URL}/ingredientes/${ingredienteBanco.id}/reposicoes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quantidade: item.quantidade }), 
+      });
+
+      if (response.ok) {
+        sucessos++;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        avisar(`Erro ao registrar ${item.nome}: ${errorData.erro || 'Falha no servidor'}`, "erro");
+      }
+    }
+
+    if (sucessos > 0) {
+      avisar(`${sucessos} item(ns) de compra adicionado(s) ao estoque.`, "sucesso");
+      await carregarEstado(); 
+      renderEstoque();
+      $("#dialogNotaCompra").close();
+      fecharCameraNota();
+      itensCompraReconhecidos = [];
+    }
+
+  } catch (erro) {
+    console.error("Erro na comunicação com a API:", erro);
+    avisar("Erro de conexão ao processar a nota fiscal.", "erro");
+  } finally {
+    btnConfirmar.disabled = false;
+    btnConfirmar.textContent = "Confirmar compra";
+  }
 }
 
 function atualizarStatusCamera(mensagem, erro = false) {
@@ -849,26 +937,44 @@ async function processarArquivoNota(arquivo, tentarQr = true) {
   await lerItensDaImagem(arquivo);
 }
 
-function excluirIngrediente(id) {
-  const item = state.estoque.find((i) => i.id === id);
-  if (
-    !item ||
-    !confirm(
-      `Excluir ${item.name} do estoque? Esta ação não pode ser desfeita.`,
-    )
-  )
-    return;
-  state.estoque = state.estoque.filter((i) => i.id !== id);
-  salvarEstoque();
-  registrar(
-    "Exclusão de ingrediente",
-    item.name,
-    item.quantity,
-    item.unit,
-    "Saldo no momento da exclusão",
-  );
-  renderEstoque();
-  avisar(`${item.name} removido do estoque.`);
+async function excluirIngrediente(id) {
+    const item = state.estoque.find((i) => i.id === id);
+    
+    if (
+        !item ||
+        !confirm(`Excluir ${item.nome} do estoque? Esta ação não pode ser desfeita.`)
+    ) return;
+
+    try {
+        const resposta = await fetch(`${API_URL}/ingredientes/${id}`, {
+            method: "DELETE"
+        });
+
+        // O SEGREDO: Em vez de atirar um erro genérico, lemos o erro do back-end!
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json();
+            avisar(`Atenção: ${erroAPI.erro}`, "erro");
+            return; // Interrompe a função aqui para não apagar do ecrã
+        }
+
+        // Se a API apagou com sucesso, removemos da tela
+        state.estoque = state.estoque.filter((i) => i.id !== id);
+        
+        registrar(
+            "Exclusão de ingrediente",
+            item.nome,
+            item.quantidade,
+            item.unidade,
+            "Saldo no momento da exclusão",
+        );
+        
+        renderEstoque();
+        avisar(`${item.nome} removido do estoque.`);
+        
+    } catch (erro) {
+        console.error(erro);
+        avisar("Falha ao comunicar com o servidor.", "erro");
+    }
 }
 
 // Garante que todo ingrediente de uma receita exista no estoque (criado com quantidade 0)
@@ -975,17 +1081,31 @@ function linhaProduto(id) {
   );
 }
 
-function excluirProduto(id) {
-  const nome = state.nomes[id];
-  if (!confirm(`Excluir o produto ${nome} do painel?`)) return;
-  delete state.nomes[id];
-  delete state.receitas[id];
-  delete state.autorizacao[id];
-  salvarProdutos();
-  registrar("Exclusão de produto", nome);
-  renderProdutos();
-  renderAutorizacao();
-  avisar(`${nome} excluído.`);
+async function excluirProduto(id) {
+    const nome = state.nomes[id];
+    if (!confirm(`Excluir o produto ${nome} do painel?`)) return;
+    
+    try {
+        const resposta = await fetch(`${API_URL}/produtos/${id}`, {
+            method: "DELETE"
+        });
+
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json().catch(() => ({}));
+            throw new Error(erroAPI.erro || "Não foi possível apagar no servidor.");
+        }
+
+        avisar(`${nome} excluído.`);
+        
+        delete state.autorizacao[id];
+        
+        await carregarEstado(); 
+        renderAutorizacao();
+        
+    } catch (erro) {
+        console.error(erro);
+        avisar(erro.message, "erro");
+    }
 }
 
 /* ---------- Autorização ---------- */
@@ -1133,115 +1253,73 @@ function mostrarResumoAutorizacao({
   $("#dialogResumo").showModal();
 }
 
-function finalizarAutorizacao() {
-  const ids = Object.keys(state.autorizacao);
-  if (ids.length === 0) return;
+async function finalizarAutorizacao() {
+    const ids = Object.keys(state.autorizacao);
+    if (ids.length === 0) return;
 
-  // 1. Calcula tudo ANTES de mexer no estoque:
-  //    - totais: o que a produção usa, na unidade de cada receita (para o resumo)
-  //    - consumo: o que sai de cada ingrediente, já na unidade do estoque.
-  //      Receitas em g e em kg do mesmo ingrediente são somadas antes de
-  //      comparar com o saldo (igual ao banco).
-  const totais = new Map();
-  const consumo = new Map();
-  const impedimentos = new Set();
+    const itensParaAPI = ids.map(id => ({
+        produtoId: Number(id),
+        quantidade: state.autorizacao[id]
+    }));
 
-  for (const id of ids) {
-    const receita = state.receitas[id] || {};
-    for (const [ing, { quantity, unit }] of Object.entries(receita)) {
-      const nome = normalizar(ing);
-      const necessario = quantity * state.autorizacao[id];
+    try {
+        const resposta = await fetch(`${API_URL}/autorizacoes`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                observacao: "Produção via painel",
+                itens: itensParaAPI
+            })
+        });
 
-      const chave = `${nome}|${unit}`;
-      const atual = totais.get(chave) || { nome, unidade: unit, total: 0 };
-      atual.total += necessario;
-      totais.set(chave, atual);
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json();
+            
+            if (erroAPI.faltantes) {
+                const impedimentos = erroAPI.faltantes.map(f => 
+                    `Estoque insuficiente de ${f.ingrediente}: disponível ${formatarQtd(f.disponivel, f.unidade)}${f.unidade}, ` +
+                    `necessário ${formatarQtd(f.necessario, f.unidade)}${f.unidade} ` +
+                    `(faltam ${formatarQtd(f.faltante, f.unidade)}${f.unidade}).`
+                );
+                
+                mostrarResumoAutorizacao({
+                    titulo: "Autorização não finalizada",
+                    texto: "Nada foi debitado do estoque. Reponha os ingredientes e tente de novo.",
+                    impedimentos: impedimentos
+                });
+            } else {
+                avisar(`Erro da API: ${erroAPI.erro}`, "erro");
+            }
+            return;
+        }
 
-      const item = state.estoque.find((i) => i.name === nome);
-      if (!item) {
-        impedimentos.add(
-          `${nome} não está no estoque. Cadastre o ingrediente antes de autorizar.`,
-        );
-        continue;
-      }
-      const debito = converterParaEstoque(necessario, unit, item.unit);
-      if (debito === null) {
-        impedimentos.add(
-          `${nome}: a receita usa ${unit}, mas o estoque está em ${item.unit}. Ajuste a unidade.`,
-        );
-        continue;
-      }
-      const acumulado = consumo.get(nome) || { item, debito: 0 };
-      acumulado.debito += debito;
-      consumo.set(nome, acumulado);
-    }
-  }
+        const dadosAPI = await resposta.json();
 
-  // 2. Confere o saldo de cada ingrediente
-  for (const [nome, { item, debito }] of consumo) {
-    const necessario = +debito.toFixed(4);
-    const disponivel = Number(item.quantity);
-    if (disponivel < necessario) {
-      const falta = +(necessario - disponivel).toFixed(4);
-      impedimentos.add(
-        `Estoque insuficiente de ${nome}: disponível ${formatarQtd(disponivel, item.unit)} ${item.unit}, ` +
-          `necessário ${formatarQtd(necessario, item.unit)} ${item.unit} ` +
-          `(faltam ${formatarQtd(falta, item.unit)} ${item.unit}).`,
-      );
-    }
-  }
+        ids.forEach(idProduto => {
+            registrar("Produção autorizada", state.nomes[idProduto], state.autorizacao[idProduto], "Un", "Produção via painel");
+        });
 
-  // 3. Se algo impede a produção, NADA é debitado e NADA vai para o histórico
-  //    (o banco faz o mesmo: devolve ESTOQUE_INSUFICIENTE e não altera nada).
-  //    A lista de autorização fica como está, para corrigir e tentar de novo.
-  if (impedimentos.size > 0) {
-    mostrarResumoAutorizacao({
-      titulo: "Autorização não finalizada",
-      texto:
-        "Nada foi debitado do estoque. Reponha os ingredientes ou reduza as quantidades e tente de novo.",
-      impedimentos: [...impedimentos],
+        if (dadosAPI.autorizacao?.consumo && Array.isArray(dadosAPI.autorizacao.consumo)) {
+    dadosAPI.autorizacao.consumo.forEach(item => {
+        registrar("Saída do estoque", item.ingrediente, item.quantidade, item.unidade, "Consumo na produção");
     });
-    return;
-  }
+}
 
-  // 4. Tudo certo: anota a produção no histórico e debita o estoque
-  const descricao = ids
-    .map((id) => `${state.autorizacao[id]}x ${state.nomes[id]}`)
-    .join(", ");
-  for (const id of ids) {
-    registrar(
-      "Produção autorizada",
-      state.nomes[id],
-      state.autorizacao[id],
-      "un",
-    );
-  }
-  for (const [nome, { item, debito }] of consumo) {
-    const saida = +debito.toFixed(4);
-    item.quantity = +(Number(item.quantity) - saida).toFixed(4);
-    registrar(
-      "Saída do estoque",
-      nome,
-      saida,
-      item.unit,
-      `Autorização: ${descricao}`,
-    );
-  }
-  salvarEstoque();
+        mostrarResumoAutorizacao({
+            titulo: "Autorização guardada na API!",
+            texto: `${ids.length} produto(s) autorizado(s) e enviado(s) para produção.`,
+            impedimentos: [] 
+        });
 
-  // 5. Mostra o resumo
-  mostrarResumoAutorizacao({
-    titulo: "Autorização finalizada",
-    texto: `${ids.length} produto(s) autorizado(s). Ingredientes usados:`,
-    ingredientes: [...totais.values()].map(
-      (t) =>
-        `${t.nome}: ${Number(t.total.toFixed(2)).toLocaleString("pt-BR")} ${t.unidade}`,
-    ),
-  });
+        state.autorizacao = {};
+        localStorage.removeItem("rascunhoAutorizacao");
+        renderAutorizacao();
+        await carregarEstado(); 
 
-  state.autorizacao = {};
-  renderAutorizacao();
-  renderEstoque();
+    } catch (erro) {
+        console.error("Erro na comunicação:", erro);
+        avisar("Falha ao comunicar com o servidor.", "erro");
+    }
 }
 
 /* ---------- Diálogo de novo produto ---------- */
@@ -1254,7 +1332,7 @@ const UNIDADE_RECEITA_PADRAO = { Kg: "g", L: "ml", Un: "un" };
 function linhaReceita(inicial = null) {
   const temEstoque = state.estoque.length > 0;
   const noEstoque =
-    inicial && state.estoque.some((i) => i.name === normalizar(inicial.nome));
+    inicial && state.estoque.some((i) => i.nome === normalizar(inicial.nome));
 
   // Campo de texto: só aparece quando a pessoa escolhe "+ Novo ingrediente"
   const campoNovo = h("input", {
@@ -1275,33 +1353,34 @@ function linhaReceita(inicial = null) {
 
   // Lista com os ingredientes que já estão no estoque
   const escolha = h(
-    "select",
-    {
-      class: "field ing-choice",
-      "aria-label": "Ingrediente",
-      onchange: () => {
-        const novo = escolha.value === NOVO_INGREDIENTE;
-        campoNovo.hidden = !novo;
-        if (novo) {
-          campoNovo.focus();
-          return;
-        }
-        const item = state.estoque.find((i) => i.name === escolha.value);
-        if (item) unidade.value = UNIDADE_RECEITA_PADRAO[item.unit] || "un";
-      },
-    },
-    h("option", {
-      value: "",
-      text: temEstoque ? "Escolha um ingrediente…" : "Estoque vazio",
-    }),
-    state.estoque.map((item) =>
-      h("option", {
-        value: item.name,
-        text: `${item.name} (${formatarQtd(item.quantity, item.unit)} ${item.unit})`,
-      }),
-    ),
-    h("option", { value: NOVO_INGREDIENTE, text: "+ Novo ingrediente" }),
-  );
+        "select",
+        {
+            class: "field ing-choice",
+            "aria-label": "Ingrediente",
+            onchange: () => {
+                const novo = escolha.value === NOVO_INGREDIENTE;
+                campoNovo.hidden = !novo;
+                if (novo) {
+                    campoNovo.focus();
+                    return;
+                }
+                // Corrigido para i.nome e item.unidade
+                const item = state.estoque.find((i) => i.nome === escolha.value);
+                if (item) unidade.value = UNIDADE_RECEITA_PADRAO[item.unidade] || "un";
+            },
+        },
+        h("option", {
+            value: "",
+            text: temEstoque ? "Escolha um ingrediente..." : "Estoque vazio",
+        }),
+        state.estoque.map((item) =>
+            h("option", {
+                value: item.nome, // Corrigido para item.nome
+                text: `${item.nome} (${formatarQtd(item.quantidade, item.unidade)} ${item.unidade})`, // Corrigido para MySQL
+            }),
+        ),
+        h("option", { value: NOVO_INGREDIENTE, text: "+ Novo ingrediente" }),
+    );
   if (!temEstoque) escolha.value = NOVO_INGREDIENTE;
 
   // Ao editar: ingrediente do estoque fica selecionado; se não estiver no estoque, vai no campo de texto
@@ -1340,6 +1419,9 @@ let produtoEmEdicao = null; // id do produto sendo editado, ou null quando é um
 function abrirDialogProduto(id = null) {
   produtoEmEdicao = id;
   $("#formProduto").reset();
+  
+  const campoNome = $("#novoProdutoNome"); // Capturamos o campo do nome
+  
   $("#dialogProdutoTitulo").textContent = id
     ? "Editar produto"
     : "Cadastrar novo produto";
@@ -1348,7 +1430,9 @@ function abrirDialogProduto(id = null) {
     : "Salvar produto";
 
   if (id) {
-    $("#novoProdutoNome").value = state.nomes[id];
+    campoNome.value = state.nomes[id];
+    campoNome.disabled = true; // BLOQUEIA o nome na edição para evitar duplicação no banco
+    
     const itens = Object.entries(state.receitas[id] || {});
     $("#linhasReceita").replaceChildren(
       ...(itens.length
@@ -1358,89 +1442,96 @@ function abrirDialogProduto(id = null) {
         : [linhaReceita()]),
     );
   } else {
+    campoNome.disabled = false; // LIBERA o nome para cadastros novos
     $("#linhasReceita").replaceChildren(linhaReceita());
   }
+  
   atualizarSugestoes();
   $("#dialogProduto").showModal();
-  $("#novoProdutoNome").focus();
+  
+  // Se estiver bloqueado, o focus vai para o primeiro campo de quantidade da receita
+  if (id) {
+    const primeiraQuantidade = document.querySelector(".ing-qty");
+    if (primeiraQuantidade) primeiraQuantidade.focus();
+  } else {
+    campoNome.focus();
+  }
 }
 
-function salvarProduto(evento) {
-  evento.preventDefault();
-  const nome = normalizar($("#novoProdutoNome").value);
+async function salvarProduto(evento) {
+    evento.preventDefault();
+    const nome = normalizar($("#novoProdutoNome").value);
 
-  if (!nome) {
-    avisar("O nome do produto não pode ficar vazio.", "erro");
-    return;
-  }
-  const nomeRepetido = Object.entries(state.nomes).some(
-    ([outroId, outroNome]) => outroNome === nome && outroId !== produtoEmEdicao,
-  );
-  if (nomeRepetido) {
-    avisar("Já existe um produto com esse nome.", "erro");
-    return;
-  }
-
-  const receita = {};
-  for (const linha of $("#linhasReceita").children) {
-    const escolhido = linha.querySelector(".ing-choice").value;
-    const ing = normalizar(
-      escolhido === NOVO_INGREDIENTE
-        ? linha.querySelector(".ing-name").value
-        : escolhido,
-    );
-    const qtd = lerNumero(linha.querySelector(".ing-qty").value);
-    if (!ing || isNaN(qtd) || qtd <= 0) continue;
-    if (receita[ing]) {
-      avisar(`${ing} aparece duas vezes na receita.`, "erro");
-      return;
+    if (!nome) {
+        avisar("O nome do produto não pode ficar vazio.", "erro");
+        return;
     }
-    receita[ing] = {
-      quantity: qtd,
-      unit: linha.querySelector(".ing-unit").value,
-    };
-  }
 
-  if (Object.keys(receita).length === 0) {
-    avisar(
-      "Cadastre pelo menos um ingrediente com quantia maior que zero.",
-      "erro",
-    );
-    return;
-  }
+    const itensParaAPI = [];
 
-  const editando = produtoEmEdicao !== null;
-  const id = editando ? produtoEmEdicao : String(state.proximoIdProduto++);
-  const nomeAnterior = state.nomes[id];
-  state.nomes[id] = nome;
-  state.receitas[id] = receita;
-  salvarProdutos();
+    // Recolhe todos os ingredientes da receita no ecrã
+    for (const linha of $("#linhasReceita").children) {
+        const escolhido = linha.querySelector(".ing-choice").value;
+        const ing = normalizar(
+            escolhido === NOVO_INGREDIENTE
+                ? linha.querySelector(".ing-name").value
+                : escolhido
+        );
+        const qtd = lerNumero(linha.querySelector(".ing-qty").value);
 
-  const textoReceita =
-    "Receita: " +
-    Object.entries(receita)
-      .map(([ing, r]) => `${ing} ${r.quantity} ${r.unit}`)
-      .join(", ");
-  if (editando) {
-    const renomeado = nomeAnterior !== nome ? ` (antes: ${nomeAnterior})` : "";
-    registrar("Edição de produto", nome, null, "", textoReceita + renomeado);
-  } else {
-    registrar("Cadastro de produto", nome, null, "", textoReceita);
-  }
-  const criados = sincronizarIngredientes(receita);
+        if (!ing || isNaN(qtd) || qtd <= 0) continue;
 
-  $("#dialogProduto").close();
-  produtoEmEdicao = null;
-  renderProdutos();
-  renderAutorizacao(); // se o nome mudou, a lista de autorização mostra o nome novo
-  renderEstoque();
+        const unidadeSelecionada = linha.querySelector(".ing-unit").value;
 
-  const acao = editando ? "atualizado" : "cadastrado";
-  avisar(
-    criados
-      ? `${nome} ${acao}. ${criados} ingrediente(s) novo(s) criado(s) no estoque.`
-      : `${nome} ${acao}.`,
-  );
+        if (itensParaAPI.some(item => item.ingrediente === ing)) {
+            avisar(`${ing} aparece duas vezes na receita.`, "erro");
+            return;
+        }
+
+        // Formato exato que o README pede: { ingrediente, quantidade, unidade }
+        itensParaAPI.push({
+            ingrediente: ing, 
+            quantidade: qtd,
+            unidade: unidadeSelecionada
+        });
+    }
+
+    if (itensParaAPI.length === 0) {
+        avisar("Cadastre pelo menos um ingrediente com quantia maior que zero.", "erro");
+        return;
+    }
+
+    try {
+        // Usamos sempre POST /produtos. A base de dados atualiza o produto sozinha se ele já existir!
+        const resposta = await fetch(`${API_URL}/produtos`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                nome: nome,
+                receita: itensParaAPI
+            })
+        });
+
+        if (!resposta.ok) {
+            const erroAPI = await resposta.json();
+            console.error("Erro do back-end:", erroAPI);
+            avisar(`Erro da API: ${erroAPI.erro}`, "erro");
+            return;
+        }
+
+        avisar(`Produto ${nome} salvo com sucesso!`, "sucesso");
+
+        $("#dialogProduto").close();
+        produtoEmEdicao = null;
+
+        // Recarrega os dados fresquinhos da API
+        await carregarEstado(); 
+        renderAutorizacao();
+
+    } catch (erro) {
+        console.error("Erro na comunicação:", erro);
+        avisar("Falha ao salvar o produto. Verifica a ligação.", "erro");
+    }
 }
 
 /* =====================================================
@@ -1450,7 +1541,7 @@ function gerarRelatorioPDF() {
   if (!window.jspdf) {
     avisar(
       "O gerador de PDF não carregou. Verifique a internet e recarregue a página.",
-      "erro",
+      "erro"
     );
     return;
   }
@@ -1460,6 +1551,7 @@ function gerarRelatorioPDF() {
   const agora = new Date();
   const corMarca = [237, 143, 54];
 
+  // Cabeçalho
   // Cabeçalho
   doc.setFontSize(16);
   doc.text("Relatório de movimentação - Luana Salgadinhos", 14, 18);
@@ -1476,9 +1568,9 @@ function gerarRelatorioPDF() {
     head: [["Ingrediente", "Quantidade", "Unidade"]],
     body: state.estoque.length
       ? state.estoque.map((i) => [
-          i.name,
-          formatarQtd(i.quantity, i.unit),
-          i.unit,
+          i.nome,
+          formatarQtd(i.quantidade, i.unidade),
+          i.unidade,
         ])
       : [[{ content: "Nenhum ingrediente no estoque.", colSpan: 3 }]],
     headStyles: { fillColor: corMarca },
@@ -1492,7 +1584,7 @@ function gerarRelatorioPDF() {
   doc.autoTable({
     startY: y + 4,
     head: [["Data", "Tipo", "Item", "Quantidade", "Detalhe"]],
-    body: state.historico.length
+   body: state.historico && state.historico.length
       ? [...state.historico]
           .reverse()
           .map((m) => [
@@ -1753,6 +1845,7 @@ function abrirPreviaLocal() {
   usuarioAtivo = null;
   state.userId = null;
   state.autorizacao = {};
+  state.historico = store.read(KEYS.historico, []);
   carregarEstado();
   $("#authScreen").hidden = true;
   $("#appRoot").hidden = false;
@@ -1820,6 +1913,7 @@ function abrirAplicacao(user) {
   usuarioAtivo = user.id;
   store.useAccount(user.id);
   state.autorizacao = {};
+  state.historico = store.read(KEYS.historico, []);
   carregarEstado();
   $("#authScreen").hidden = true;
   $("#appRoot").hidden = false;
