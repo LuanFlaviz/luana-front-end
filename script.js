@@ -1,4 +1,4 @@
-const API_URL = "http://localhost:3000/api";
+const API_URL = "https://projeto-integrador-nnpt.onrender.com/api";
 
 /* =====================================================
        1. ARMAZENAMENTO (mesmas chaves das páginas antigas,
